@@ -9,15 +9,19 @@ import struct
 from pathlib import Path
 from typing import List
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 _HEADER_BYTES: int = 4   # uint32 big-endian: byte count of the embedded payload
 _CHANNELS: int = 3       # RGB — one LSB harvested per channel per pixel
 
 
 def _capacity_bytes(width: int, height: int) -> int:
-    """Maximum payload bytes storable in an image of given dimensions."""
-    return (width * height * _CHANNELS) // 8 - _HEADER_BYTES
+    """Maximum payload bytes storable in an image of given dimensions.
+
+    Returns 0 for images too small to hold even the 4-byte length header,
+    ensuring callers always receive a non-negative, meaningful value.
+    """
+    return max(0, (width * height * _CHANNELS) // 8 - _HEADER_BYTES)
 
 
 def _to_bits(data: bytes) -> List[int]:
@@ -71,37 +75,43 @@ def inject_secret_into_image(
         bits [0 .. 31]   → 4-byte big-endian uint32 payload length header
         bits [32 .. end] → payload content, MSB first per byte
 
-    Only the Least Significant Bit of each colour channel is modified;
-    the remaining 7 bits of every channel are preserved, making the
-    modification statistically imperceptible to the human visual system.
-    Output is always written as lossless PNG to preserve the embedded bits
-    against compression artefacts.
+    Only the Least Significant Bit of each colour channel is modified.
+    Output is always written as lossless PNG; the extension of
+    output_image_path is normalized to .png regardless of what was supplied.
 
     Args:
         cover_image_path:  Path to the carrier image (PNG, JPG, BMP, etc.).
         payload_bytes:     The raw encrypted blob to conceal.
-        output_image_path: Destination path for the steganographic PNG.
+        output_image_path: Destination path; extension forced to .png.
 
     Raises:
         FileNotFoundError: if the cover image does not exist.
-        ValueError:        if the payload exceeds the image's LSB capacity.
+        ValueError:        if the file is not a recognized image format, or
+                           the payload exceeds the image's LSB capacity.
     """
     cover = Path(cover_image_path)
     if not cover.exists():
         raise FileNotFoundError(f"Cover image not found: {cover_image_path}")
 
-    img: Image.Image = Image.open(cover).convert("RGB")
-    width, height = img.size
-    capacity = _capacity_bytes(width, height)
+    try:
+        img: Image.Image = Image.open(cover).convert("RGB")
+    except UnidentifiedImageError as exc:
+        raise ValueError(
+            f"Not a recognized image format: {cover_image_path}"
+        ) from exc
 
-    if len(payload_bytes) > capacity:
+    width, height = img.size
+
+    header: bytes = struct.pack(">I", len(payload_bytes))
+    bitstream: List[int] = _to_bits(header + payload_bytes)
+    total_channels = width * height * _CHANNELS
+
+    if len(bitstream) > total_channels:
+        capacity = _capacity_bytes(width, height)
         raise ValueError(
             f"Payload ({len(payload_bytes):,} bytes) exceeds image capacity "
             f"({capacity:,} bytes). Use a larger cover image."
         )
-
-    header: bytes = struct.pack(">I", len(payload_bytes))
-    bitstream: List[int] = _to_bits(header + payload_bytes)
 
     pixels: List[List[int]] = [list(px) for px in img.getdata()]
 
@@ -113,7 +123,7 @@ def inject_secret_into_image(
     out_img: Image.Image = Image.new("RGB", (width, height))
     out_img.putdata([tuple(px) for px in pixels])  # type: ignore[arg-type]
 
-    out_path = Path(output_image_path)
+    out_path = Path(output_image_path).with_suffix(".png")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_img.save(str(out_path), format="PNG")
 
@@ -134,14 +144,21 @@ def extract_secret_from_image(stego_image_path: str) -> bytes:
 
     Raises:
         FileNotFoundError: if the stego image does not exist.
-        ValueError:        if the embedded length is zero, exceeds capacity,
+        ValueError:        if the file is not a recognized image format,
+                           the embedded length is zero, exceeds capacity,
                            or the image is structurally too small.
     """
     stego = Path(stego_image_path)
     if not stego.exists():
         raise FileNotFoundError(f"Stego image not found: {stego_image_path}")
 
-    img: Image.Image = Image.open(stego).convert("RGB")
+    try:
+        img: Image.Image = Image.open(stego).convert("RGB")
+    except UnidentifiedImageError as exc:
+        raise ValueError(
+            f"Not a recognized image format: {stego_image_path}"
+        ) from exc
+
     width, height = img.size
     pixels: List = list(img.getdata())
 

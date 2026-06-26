@@ -87,10 +87,15 @@ def _hr(width: int = 62) -> None:
 
 
 def _prompt(label: str, default: str = "") -> str:
+    """Prompt the user for input, returning `default` on EOF (piped input).
+
+    KeyboardInterrupt is NOT caught here — it propagates so the main loop
+    can handle Ctrl+C as a clean exit from anywhere in the program.
+    """
     hint = f" {DIM}[{default}]{RST}" if default else ""
     try:
         raw = input(f"  {G}❯{RST} {W}{label}{hint}: {RST}").strip()
-    except (KeyboardInterrupt, EOFError):
+    except EOFError:
         print()
         return default
     return raw if raw else default
@@ -101,6 +106,14 @@ def _pause() -> None:
         input(f"\n  {DIM}Appuyez sur ENTRÉE pour retourner au menu principal…{RST}")
     except (KeyboardInterrupt, EOFError):
         pass
+
+
+def _print_fingerprint(pub_key_path: str) -> None:
+    """Print the SHA-256 fingerprint of a public key in 4-char colon-separated groups."""
+    raw_fp = get_key_fingerprint(pub_key_path)
+    segments = [raw_fp[i : i + 4] for i in range(0, len(raw_fp), 4)]
+    print(f"\n  {C}  Empreinte publique SHA-256:{RST}")
+    print(f"  {BOLD}{G}  {':'.join(segments)}{RST}")
 
 
 def _show_banner() -> None:
@@ -172,6 +185,9 @@ def _flow_encode() -> None:
         _pause()
         return
 
+    # Always produce a .png — normalize here so the success message is accurate
+    output_path_str = str(Path(output_path_str).with_suffix(".png"))
+
     pub_key_str = _prompt("Chemin de la clé publique RSA", str(_PUB_KEY))
     if not Path(pub_key_str).exists():
         _log("ERR", f"Clé publique introuvable: {pub_key_str}")
@@ -194,11 +210,11 @@ def _flow_encode() -> None:
     try:
         inject_secret_into_image(cover_path_str, encrypted_blob, output_path_str)
     except ValueError as exc:
-        _log("ERR", f"Capacité insuffisante: {exc}")
+        _log("ERR", f"Erreur d'injection: {exc}")
         _pause()
         return
     except Exception as exc:
-        _log("ERR", f"Erreur d'injection: {exc}")
+        _log("ERR", f"Erreur inattendue lors de l'injection: {exc}")
         _pause()
         return
 
@@ -275,7 +291,9 @@ def _flow_decode() -> None:
             _pause()
             return
         try:
-            Path(out_path_str).write_bytes(plaintext)
+            out_file = Path(out_path_str)
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_bytes(plaintext)
             _log("OK", f"Secret enregistré: {out_path_str}  ({len(plaintext):,} octets)")
         except Exception as exc:
             _log("ERR", f"Impossible d'écrire le fichier: {exc}")
@@ -311,11 +329,8 @@ def _flow_keys() -> None:
     if keys_exist:
         _log("OK", f"Paire de clés détectée dans: {_KEYS_DIR}")
         try:
-            raw_fp = get_key_fingerprint(str(_PUB_KEY))
-            segments = [raw_fp[i:i+4] for i in range(0, len(raw_fp), 4)]
-            formatted = ":".join(segments)
-            print(f"\n  {C}  Empreinte publique SHA-256:{RST}")
-            print(f"  {BOLD}{G}  {formatted}{RST}\n")
+            _print_fingerprint(str(_PUB_KEY))
+            print()
         except Exception as exc:
             _log("WARN", f"Impossible de lire l'empreinte: {exc}")
         print(f"  {DIM}  Clé privée  → {_PRIV_KEY}{RST}")
@@ -358,8 +373,6 @@ def _flow_keys() -> None:
     _log("PROC", "Génération RSA-2048 en cours (cela peut prendre quelques secondes)…")
     t0 = time.monotonic()
     try:
-        priv_path.parent.mkdir(parents=True, exist_ok=True)
-        pub_path.parent.mkdir(parents=True, exist_ok=True)
         generate_rsa_keypair(str(priv_path), str(pub_path))
     except Exception as exc:
         _log("ERR", f"Échec de la génération: {exc}")
@@ -370,11 +383,7 @@ def _flow_keys() -> None:
     _log("OK", f"Paire RSA-2048 générée en {elapsed:.2f}s")
 
     try:
-        raw_fp = get_key_fingerprint(str(pub_path))
-        segments = [raw_fp[i:i+4] for i in range(0, len(raw_fp), 4)]
-        formatted = ":".join(segments)
-        print(f"\n  {C}  Empreinte publique SHA-256:{RST}")
-        print(f"  {BOLD}{G}  {formatted}{RST}")
+        _print_fingerprint(str(pub_path))
     except Exception:
         pass
 
@@ -399,7 +408,7 @@ def main() -> None:
 
         try:
             choice = _prompt("Votre choix (1-4)").strip()
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt:
             choice = "4"
 
         if choice == "4":
@@ -413,7 +422,10 @@ def main() -> None:
             time.sleep(1.2)
             continue
 
-        handler()
+        try:
+            handler()
+        except KeyboardInterrupt:
+            pass  # Ctrl+C inside a flow returns to main menu silently
 
 
 if __name__ == "__main__":
