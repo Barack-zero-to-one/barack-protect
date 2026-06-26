@@ -236,17 +236,151 @@ Pressing Ctrl+C at any point in the application produces a clean exit rather tha
 
 ---
 
-## File Structure
+---
+
+## Distributed Steganographic Network
+
+### What It Does
+
+The distributed extension fragments a secret across N independent images. Each
+image can be posted publicly on any platform that preserves PNG losslessly
+(Twitter, Telegram, Imgur). The secret is unrecoverable unless all N images
+are collected. An adversary who obtains N-1 images learns nothing — this is a
+provable mathematical guarantee, not an engineering assumption.
+
+### Why It Matters
+
+Hiding a single large encrypted file in one image creates a single point of
+failure and a single point of suspicion. Spreading the secret across N
+ordinary images that appear unrelated eliminates both problems. Each image is
+individually meaningless noise. Only the recipient, who holds the Session ID
+and the private key, can assemble and decrypt the original secret.
+
+### XOR N-of-N Secret Sharing
+
+The algorithm is a one-time pad applied N-1 times:
+
+```
+shares[0]       = random bytes (length = len(secret))
+shares[1]       = random bytes (length = len(secret))
+...
+shares[N-2]     = random bytes (length = len(secret))
+shares[N-1]     = shares[0] XOR shares[1] XOR ... XOR shares[N-2] XOR secret
+
+Reconstruction: shares[0] XOR shares[1] XOR ... XOR shares[N-1] = secret
+```
+
+Each of the first N-1 shares is independently random. The last share is the
+XOR accumulation of all previous shares with the secret. XOR-ing all N shares
+together cancels every random pad and recovers the original exactly.
+
+Security property: any N-1 shares are statistically independent of the secret.
+An attacker with N-1 shares faces exactly the same uncertainty as an attacker
+with zero shares.
+
+### Fragment Packet Wire Format
+
+Each share is wrapped in a header before embedding:
+
+```
+Offset    Size      Field
+0         16 bytes  Session ID (random UUID, links all N images together)
+16         1 byte   Fragment index (0-based)
+17         1 byte   Total fragment count N
+18         4 bytes  Share data length (big-endian uint32)
+22         N bytes  XOR share data
+```
+
+This packet is the payload passed to inject_secret_into_image. The stego
+engine adds its own 4-byte length prefix on top, so the total overhead per
+image is 26 bytes plus the share data.
+
+### Distribute Flow
+
+```
+User enters secret text or file
+          |
+encrypt_payload(secret, public_key)       crypto_core.py
+          |
+split_into_shares(encrypted_blob, N)      fragment_engine.py
+          |
+for each share i:
+    pack_fragment_packet(session_id, i, N, share)
+          |
+    generate_cover_image() or user photo  channel.py
+          |
+    inject_secret_into_image(cover, packet, output)   stego_engine.py
+          |
+    channel.post_fragment() saves BARACK_{prefix}_{i:03d}.png
+
+Display Session ID (32 hex characters) to share with recipient
+```
+
+### Reconstruct Flow
+
+```
+User provides channel folder + Session ID + private key
+          |
+channel.scan_session(session_id_hex)
+    scans folder for BARACK_*.png
+    extracts each stego payload
+    unpacks fragment packet
+    verifies session ID matches exactly
+          |
+reconstruct_from_shares(ordered_shares)   fragment_engine.py
+          |
+decrypt_payload(encrypted_blob, private_key)   crypto_core.py
+          |
+Display or save plaintext
+```
+
+### Channel Naming Convention
+
+```
+BARACK_{SESSION_PREFIX_8}_{INDEX:03d}.png
+
+Example with N=5:
+    BARACK_A1B2C3D4_000.png
+    BARACK_A1B2C3D4_001.png
+    BARACK_A1B2C3D4_002.png
+    BARACK_A1B2C3D4_003.png
+    BARACK_A1B2C3D4_004.png
+```
+
+The 8-character prefix is used for fast filename pre-filtering. The full 32-character
+Session ID embedded inside each packet is the authoritative identifier verified
+on extraction.
+
+### Synthetic Cover Generation
+
+When the user does not supply cover images, the system generates random RGB noise
+images sized precisely for the fragment payload:
+
+```
+required_bits   = (packet_size + 4) * 8     (packet + stego header)
+required_pixels = ceil(required_bits / 3 * 1.4)    (40% buffer)
+side            = ceil(sqrt(required_pixels))
+image           = side x side pixels of os.urandom() data
+```
+
+The 40% buffer prevents off-by-one failures at image boundaries.
+
+---
+
+## Updated File Structure
 
 ```
 barack protect/
-    crypto_core.py      RSA-2048 key management and AES-256-GCM encryption
-    stego_engine.py     LSB injection and extraction using Pillow
-    main.py             Interactive CLI orchestrator with ASCII banner
-    requirements.txt    Python package dependencies
-    README.md           Project overview and usage guide
+    crypto_core.py        RSA-2048 key management and AES-256-GCM encryption
+    stego_engine.py       LSB injection and extraction using Pillow
+    main.py               Interactive CLI for single-image encode and decode
+    fragment_engine.py    XOR N-of-N secret sharing and fragment packet format
+    channel.py            Local filesystem channel and synthetic cover generation
+    distribute_main.py    Interactive CLI for distributed multi-image mode
+    requirements.txt      Python package dependencies
+    README.md             Project overview and usage guide
     docs/
-        ARCHITECTURE.md     This document
+        ARCHITECTURE.md   This document
 ```
 
 ---
