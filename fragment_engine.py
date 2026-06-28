@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import struct
-import uuid
 from typing import List, Tuple
 
 
@@ -16,7 +15,7 @@ _PACKET_HEADER_SIZE: int = 22   # 16B session_id + 1B index + 1B total + 4B data
 
 def generate_session_id() -> bytes:
     """Generate a cryptographically random 16-byte session identifier."""
-    return uuid.uuid4().bytes
+    return os.urandom(16)
 
 
 def format_session_id(session_id: bytes) -> str:
